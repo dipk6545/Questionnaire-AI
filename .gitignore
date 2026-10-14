@@ -1,0 +1,30 @@
+# Environment Variables
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.venv/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Vite
+frontend/dist/
+frontend/dist-ssr/
+*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
