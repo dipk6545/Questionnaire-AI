@@ -1,20 +1,18 @@
 """Database session and connection engine configuration."""
 from collections.abc import AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from app.core.config import get_settings
+from backend.app.core.config import get_settings
 
 app_settings = get_settings()
 
 
 async_engine = create_async_engine(
     app_settings.DATABASE_URL,
-    echo=True,
+    echo=False,
     future=True,
     pool_pre_ping=True,      # Tests connection before using it
     pool_recycle=300,        # Recycles connection after 5 minutes
-    connect_args={
-        "statement_cache_size": 0  # Required for PgBouncer/LayerBase poolers
-    }
+    connect_args={"statement_cache_size": 0} if app_settings.DATABASE_URL.startswith("postgresql") else {},
 )
 
 

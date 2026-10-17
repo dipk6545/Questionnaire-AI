@@ -1,130 +1,236 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import api from './services/api';
+import './App.css';
+
+const DETAILS = {
+  SQL: ['{ }', 'Queries, transactions & data modeling'], Python: ['Py', 'Code, concurrency & problem solving'],
+  Statistics: ['σ', 'Inference, experiments & uncertainty'], 'Data Science': ['DS', 'Data quality, analysis & decisions'],
+  'Machine Learning': ['ML', 'Models, validation & generalization'], 'Deep Learning': ['DL', 'Networks, optimization & inference'],
+  MLOps: ['Ops', 'Deployment, monitoring & reliability'], 'AI Engineering': ['AI', 'LLMs, retrieval & evaluation'],
+};
+const LEVEL_COPY = ['Applied foundations', 'Connected concepts', 'Multi-step reasoning', 'Incidents & real-world tradeoffs'];
+const message = (e) => typeof e.response?.data?.detail === 'string' ? e.response.data.detail
+  : e.code === 'ECONNABORTED' ? 'This is taking longer than expected. Check History before starting again.'
+    : e.message || 'Unable to complete this request.';
+const date = (value) => new Date(value).toLocaleString();
 
 export default function App() {
-  const [loading, setLoading] = useState(false);
   const [user, setUser] = useState(null);
-  const [error, setError] = useState(null);
+  const [view, setView] = useState('login');
+  const [busy, setBusy] = useState('session');
+  const [error, setError] = useState('');
+  const [options, setOptions] = useState(null);
+  const [subject, setSubject] = useState('');
+  const [level, setLevel] = useState('');
+  const [exam, setExam] = useState(null);
+  const [answers, setAnswers] = useState({});
+  const [result, setResult] = useState(null);
+  const [history, setHistory] = useState({ attempts: [], performance: [] });
+  const [saveStatus, setSaveStatus] = useState('');
+  const initialized = useRef(false);
+  const saveQueue = useRef(Promise.resolve());
+  const revision = useRef(0);
+  const dirty = useRef(new Map());
+  const heading = useRef(null);
+  const errorBanner = useRef(null);
 
-  // Check URL parameters for OAuth callback code
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const code = params.get('code');
-
-    if (code) {
-      setLoading(true);
-      // Clean query params from URL
-      window.history.replaceState({}, document.title, window.location.pathname);
-
-      api
-        .get('/auth/authenticate', { params: { code } })
-        .then((res) => {
-          setUser(res.data);
-          setLoading(false);
-        })
-        .catch((err) => {
-          const detail = err.response?.data?.detail || err.message || 'Authentication failed';
-          setError(detail);
-          setLoading(false);
-        });
-    }
+    if (initialized.current) return;
+    initialized.current = true;
+    const initialize = async () => {
+      const params = new URLSearchParams(window.location.search);
+      try {
+        if (params.has('error')) throw new Error('Google sign-in was cancelled. Please try again.');
+        if (params.has('code')) {
+          const state = params.get('state');
+          if (!state || state !== sessionStorage.getItem('oauth-state')) throw new Error('Invalid sign-in request. Please try again.');
+          const { data } = await api.get('/auth/authenticate', { params: { code: params.get('code'), state } });
+          sessionStorage.setItem('questionnaire-token', data.token);
+          setUser(data); setView('setup');
+        } else if (sessionStorage.getItem('questionnaire-token')) {
+          const { data } = await api.get('/auth/me');
+          setUser(data); setView('setup');
+        }
+      } catch (e) { sessionStorage.removeItem('questionnaire-token'); setError(message(e)); }
+      finally {
+        if (params.has('code') || params.has('error')) {
+          window.history.replaceState({}, '', window.location.pathname);
+          sessionStorage.removeItem('oauth-state');
+        }
+        setBusy('');
+      }
+    };
+    initialize();
   }, []);
 
-  const handleGoogleLogin = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      const res = await api.get('/auth/login');
-      if (res.data?.url) {
-        window.location.href = res.data.url;
+  useEffect(() => {
+    const id = api.interceptors.response.use(r => r, e => {
+      if (e.response?.status === 401) {
+        sessionStorage.removeItem('questionnaire-token');
+        setUser(null); setExam(null); setResult(null); setView('login');
+        setError('Your session expired. Sign in again; saved assessments remain in your history.');
       }
-    } catch (err) {
-      const detail = err.response?.data?.detail || err.message || 'Failed to retrieve login URL';
-      setError(detail);
-      setLoading(false);
+      return Promise.reject(e);
+    });
+    return () => api.interceptors.response.eject(id);
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    Promise.all([api.get('/examinations/options'), api.get('/examinations/history')])
+      .then(([o, h]) => { if (!cancelled) { setOptions(o.data); setHistory(h.data); } })
+      .catch(e => { if (!cancelled) setError(message(e)); });
+    return () => { cancelled = true; };
+  }, [user]);
+
+  useEffect(() => { heading.current?.focus(); window.scrollTo(0, 0); }, [view]);
+  useEffect(() => {
+    if (error) {
+      errorBanner.current?.focus({ preventScroll: true });
+      errorBanner.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
     }
-  };
+  }, [error]);
+  useEffect(() => {
+    if (view !== 'quiz') return;
+    const warn = e => { e.preventDefault(); e.returnValue = ''; };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [view]);
 
-  const handleSignOut = () => {
-    setUser(null);
-  };
+  async function action(name, work) {
+    setBusy(name); setError('');
+    try { await work(); } catch (e) { setError(message(e)); } finally { setBusy(''); }
+  }
 
-  return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-4">
-      <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl flex flex-col items-center">
-        
-        {/* App Header */}
-        <div className="mb-8 text-center">
-          <div className="w-14 h-14 bg-indigo-600/20 text-indigo-400 border border-indigo-500/30 rounded-2xl flex items-center justify-center mx-auto mb-4 text-2xl font-bold shadow-inner">
-            AI
-          </div>
-          <h1 className="text-2xl font-bold tracking-tight text-white">Questionnaire AI</h1>
-          <p className="text-sm text-slate-400 mt-1">Smart Interview & Assessment Platform</p>
-        </div>
+  function login() {
+    action('login', async () => {
+      const { data } = await api.get('/auth/login');
+      sessionStorage.setItem('oauth-state', data.state);
+      window.location.assign(data.url);
+    });
+  }
 
-        {error && (
-          <div className="w-full mb-6 p-3 bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs rounded-xl text-center">
-            {error}
-          </div>
-        )}
+  function signOut() {
+    action('logout', async () => {
+      await saveQueue.current;
+      if (view === 'quiz') await api.put(`/examinations/${exam.id}/answers`, batch());
+      await api.post('/auth/logout'); sessionStorage.removeItem('questionnaire-token');
+      setUser(null); setView('login'); setExam(null); setResult(null); setOptions(null);
+      setSubject(''); setLevel(''); setHistory({ attempts: [], performance: [] });
+    });
+  }
 
-        {user ? (
-          /* Logged In View */
-          <div className="w-full flex flex-col items-center text-center space-y-4">
-            <div className="w-16 h-16 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-400 flex items-center justify-center text-xl font-semibold">
-              {user.name ? user.name[0].toUpperCase() : 'U'}
-            </div>
-            <div>
-              <h2 className="text-lg font-semibold text-white">{user.name || 'User'}</h2>
-              <p className="text-sm text-slate-400">{user.email}</p>
-            </div>
-            <div className="w-full pt-4">
-              <button
-                onClick={handleSignOut}
-                className="w-full py-2.5 px-4 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-medium transition cursor-pointer"
-              >
-                Sign Out
-              </button>
-            </div>
-          </div>
-        ) : (
-          /* Sign In with Google View */
-          <div className="w-full flex flex-col items-center">
-            <button
-              onClick={handleGoogleLogin}
-              disabled={loading}
-              className="w-full flex items-center justify-center gap-3 py-3 px-4 rounded-xl bg-white hover:bg-slate-100 text-slate-900 font-medium text-sm transition shadow-lg disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-            >
-              {loading ? (
-                <span>Connecting...</span>
-              ) : (
-                <>
-                  <svg className="w-5 h-5" viewBox="0 0 24 24">
-                    <path
-                      fill="#4285F4"
-                      d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
-                    />
-                    <path
-                      fill="#34A853"
-                      d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
-                    />
-                    <path
-                      fill="#FBBC05"
-                      d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"
-                    />
-                    <path
-                      fill="#EA4335"
-                      d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
-                    />
-                  </svg>
-                  <span>Sign in with Google</span>
-                </>
-              )}
-            </button>
-          </div>
-        )}
+  function showExam(data) {
+    dirty.current.clear();
+    setExam(data); setAnswers(Object.fromEntries(data.questions.map(q => [q.id, q.selected_options])));
+    setSaveStatus('Saved to your account'); setView('quiz');
+  }
 
-      </div>
-    </div>
-  );
+  function start() {
+    action('generate', async () => {
+      const { data } = await api.post('/examinations', { subject, level, request_id: crypto.randomUUID() });
+      showExam(data);
+    });
+  }
+
+  function choose(q, index) {
+    const selected = q.kind === 'single' ? [index]
+      : (answers[q.id] || []).includes(index) ? answers[q.id].filter(i => i !== index) : [...(answers[q.id] || []), index];
+    setAnswers(old => ({ ...old, [q.id]: selected }));
+    const currentRevision = ++revision.current;
+    dirty.current.set(q.id, currentRevision);
+    setSaveStatus('Saving…');
+    // Serial requests prevent an older selection overwriting a newer one.
+    saveQueue.current = saveQueue.current.then(() => api.put(`/examinations/${exam.id}/answers`, {
+      answers: [{ question_id: q.id, selected_options: selected }],
+    })).then(() => {
+      if (dirty.current.get(q.id) === currentRevision) dirty.current.delete(q.id);
+      if (revision.current === currentRevision) setSaveStatus(dirty.current.size ? 'Some answers are unsaved. Use Save all before leaving.' : 'Saved to your account');
+    }).catch(() => { if (revision.current === currentRevision) setSaveStatus('Some answers are unsaved. Submit or retry saving before leaving.'); });
+  }
+
+  const batch = () => ({ answers: exam.questions.map(q => ({ question_id: q.id, selected_options: answers[q.id] || [] })) });
+  function saveAll() {
+    action('save', async () => {
+      await saveQueue.current; await api.put(`/examinations/${exam.id}/answers`, batch());
+      dirty.current.clear();
+      setSaveStatus('Saved to your account');
+    });
+  }
+  function submit() {
+    if (!window.confirm('Submit all five answers? Your selections will be final. Multiple-answer questions require an exact match for credit.')) return;
+    action('submit', async () => {
+      await saveQueue.current;
+      const { data } = await api.post(`/examinations/${exam.id}/submit`, batch());
+      setResult(data); setView('result');
+    });
+  }
+
+  function showHistory() {
+    action('history', async () => {
+      await saveQueue.current;
+      if (view === 'quiz') await api.put(`/examinations/${exam.id}/answers`, batch());
+      const { data } = await api.get('/examinations/history'); setHistory(data); setView('history');
+    });
+  }
+  function openAttempt(attempt) {
+    action('open', async () => {
+      if (attempt.status === 'submitted') {
+        const { data } = await api.get(`/examinations/${attempt.id}/result`); setResult(data); setView('result');
+      } else {
+        const { data } = await api.get(`/examinations/${attempt.id}`); showExam(data);
+      }
+    });
+  }
+  function discard(attempt) {
+    if (!window.confirm('Discard this unfinished assessment? It will remain listed in your history.')) return;
+    action('discard', async () => {
+      await api.post(`/examinations/${attempt.id}/discard`);
+      const { data } = await api.get('/examinations/history'); setHistory(data);
+    });
+  }
+  function feedback() {
+    action('feedback', async () => {
+      const { data } = await api.post(`/examinations/${result.id}/feedback`); setResult(data);
+    });
+  }
+  const answered = exam?.questions.filter(q => answers[q.id]?.length).length || 0;
+  const disabled = !!busy;
+
+  return <div className="app-shell">
+    <header className="topbar"><div className="topbar-inner"><a href="/" className="brand"><span className="brand-icon">Q</span><span>Questionnaire <b>AI</b><small>APPLIED SKILLS ASSESSMENTS</small></span></a>
+      {user && <div className="account"><span className="avatar">{(user.name || user.email)[0].toUpperCase()}</span><span className="account-name">{user.name || user.email}</span><button className="text-button" onClick={signOut} disabled={disabled}>Sign out</button></div>}
+    </div></header>
+    <main className="workspace">
+      {user && <nav className="navigation" aria-label="Main"><button className={view === 'setup' ? 'active' : ''} disabled={disabled || view === 'quiz'} onClick={() => { setView('setup'); setError(''); }}>New assessment</button><button className={view === 'history' ? 'active' : ''} disabled={disabled} onClick={showHistory}>History & performance</button></nav>}
+      {error && <div className="error-banner" ref={errorBanner} tabIndex={-1} role="alert"><div><strong>Unable to continue</strong><p>{error}</p></div><button className="text-button" onClick={() => setError('')} aria-label="Dismiss error">Dismiss</button></div>}
+
+      {view === 'login' && <section className="login-view"><div className="eyebrow">PRACTICE WITH PURPOSE</div><h1 ref={heading} tabIndex={-1}>Turn knowledge<br />into confidence.</h1><p className="lead">Realistic questions. Clear feedback.<br />A better picture of your professional skills.</p><div className="login-card"><span className="brand-icon">Q</span><h2>Your next challenge starts here</h2><p>Sign in to take assessments and track your progress.</p><button className="google-button" onClick={login} disabled={disabled}><span className="google-mark" aria-hidden="true">G</span>{busy ? 'Connecting…' : 'Continue with Google'}</button><small>Your assessments and results are saved to your account.</small></div><div className="login-facts"><span>8 subjects</span><span>4 levels</span><span>5 questions per assessment</span></div></section>}
+
+      {view === 'setup' && <section><div className="eyebrow">BUILD YOUR PRACTICE</div><h1 ref={heading} tabIndex={-1}>Choose your challenge.</h1><p className="lead">Focus on a subject. Test your judgment. Learn what to work on next.</p>
+        <div className="section-label"><h2><span>01</span> Pick a subject</h2><small>Choose one</small></div>
+        <div className="subject-grid">{options ? options.subjects.map((s, i) => <button key={s} disabled={disabled} aria-pressed={subject === s} className={`subject-card ${subject === s ? 'selected' : ''}`} onClick={() => setSubject(s)}><span className={`subject-icon tone-${i % 4}`}>{DETAILS[s][0]}</span><strong>{s}</strong><small>{DETAILS[s][1]}</small><span className="choice-indicator" aria-hidden="true">{subject === s ? '✓' : '+'}</span></button>) : <p role="status">Loading subjects… <button className="text-button" onClick={() => action('options', async () => { const { data } = await api.get('/examinations/options'); setOptions(data); })}>Retry</button></p>}</div>
+        <div className="section-label"><h2><span>02</span> Set the level</h2><small>Choose one</small></div><div className="level-grid">{options?.levels.map((l, i) => <label key={l} className={`level-card ${level === l ? 'selected' : ''}`}><input type="radio" name="level" checked={level === l} onChange={() => setLevel(l)} disabled={disabled} /><span><strong>{l}</strong><small>{LEVEL_COPY[i]}</small></span></label>)}</div>
+        {level === 'Production grade' && <p className="context-note">Expect realistic debugging, deployment and reliability scenarios, with constraints and tradeoffs grounded in {subject || 'your selected subject'}.</p>}
+        <div className="rules"><strong>A short test. A meaningful challenge.</strong><p>5 questions · 4 single-answer + 1 multiple-answer · Untimed</p><p>1 mark per correct question. Multiple-answer questions require all correct options and no incorrect options. No partial credit or negative marking.</p></div>
+        <div className="action-bar"><div><strong>{subject || 'Select a subject'}{level && ` · ${level}`}</strong><small>Fresh questions, reviewed before you begin</small></div><button className="primary" disabled={!subject || !level || disabled} onClick={start}>{busy === 'generate' ? 'Generating & reviewing…' : 'Start assessment →'}</button></div>{busy === 'generate' && <p className="status-note" role="status">Preparing and independently reviewing your questions. This can take a few minutes.</p>}
+      </section>}
+
+      {view === 'quiz' && exam && <section><div className="eyebrow">ASSESSMENT IN PROGRESS</div><h1 ref={heading} tabIndex={-1}>{exam.subject}</h1><div className="quiz-meta"><span>{exam.level} · 5 questions</span><strong aria-live="polite">{answered} of 5 answered</strong></div><progress aria-label="Questions answered" max={5} value={answered} /><p className="save-status" role="status">{saveStatus} <button className="text-button" disabled={disabled} onClick={saveAll}>Save all</button></p>
+        <div className="questions">{exam.questions.map((q, i) => <fieldset className="question-card" key={q.id} disabled={disabled}><legend><span className="question-count">QUESTION {String(i + 1).padStart(2, '0')}</span><span className="question-text">{q.text}</span></legend><div className="question-meta"><span>{q.topic}</span><span className={q.kind === 'multiple' ? 'multiple-badge' : ''}>{q.kind === 'multiple' ? 'Select all correct options' : 'Select one option'}</span></div><div className="option-list">{q.options.map((o, j) => <label key={j} className={`answer-option ${answers[q.id]?.includes(j) ? 'chosen' : ''}`}><input type={q.kind === 'multiple' ? 'checkbox' : 'radio'} name={`q-${q.id}`} checked={answers[q.id]?.includes(j) || false} onChange={() => choose(q, j)} /><span className="option-letter">{'ABCD'[j]}</span><span>{o}</span></label>)}</div></fieldset>)}</div>
+        <div className="action-bar"><div><strong>{answered === 5 ? 'Ready to review your performance?' : `${5 - answered} questions still to answer`}</strong><small>Your selections are final after submission.</small></div><button className="primary" disabled={answered !== 5 || disabled} onClick={submit}>{busy === 'submit' ? 'Scoring & preparing feedback…' : 'Submit assessment'}</button></div>
+      </section>}
+
+      {view === 'result' && result && <section><div className="eyebrow">ASSESSMENT COMPLETE</div><h1 ref={heading} tabIndex={-1}>Your results.</h1><p className="lead">{result.subject} · {result.level}</p><div className="result-card"><div className="score"><small>YOUR SCORE</small><strong>{result.score}<span> / {result.total}</span></strong><span>{result.percentage}% correct</span></div><div className="result-intro"><h2>Every attempt gives you direction.</h2><p>{result.feedback?.summary || 'Your score and answers are saved. Personalized feedback is temporarily unavailable.'}</p>{!result.feedback && <button className="secondary" disabled={disabled} onClick={feedback}>{busy === 'feedback' ? 'Preparing feedback…' : 'Retry feedback'}</button>}</div></div>
+        {result.feedback && <div className="feedback-grid">{[['Strengths', 'strengths'], ['Focus areas', 'focus_areas'], ['Next steps', 'next_steps']].map(([label, key]) => <section key={key} className="feedback-card"><h2>{label}</h2>{result.feedback[key].length ? <ul>{result.feedback[key].map((s, i) => <li key={i}>{s}</li>)}</ul> : <p>{key === 'strengths' ? 'Keep practicing to build more evidence.' : 'No specific gaps identified in this short assessment.'}</p>}</section>)}</div>}
+        <div className="section-label"><h2>Answer review</h2><small>{result.score} correct · {5 - result.score} to revisit</small></div><div className="questions">{result.review.map((q, i) => <article className="review-card" key={q.id}><div className="review-header"><span className={`outcome ${q.correct ? 'correct' : 'incorrect'}`}>{q.correct ? 'Correct' : 'To revisit'}</span><small>Question {i + 1} · {q.topic} · {q.kind === 'multiple' ? 'Multiple answers' : 'Single answer'}</small></div><h3>{q.text}</h3><div className="option-list">{q.options.map((o, j) => <div key={j} className={`answer-option review-option ${q.correct_options.includes(j) ? 'right-answer' : q.selected_options.includes(j) ? 'wrong-answer' : ''}`}><span className="option-letter">{'ABCD'[j]}</span><span>{o}</span><small>{[q.correct_options.includes(j) && 'Correct option', q.selected_options.includes(j) && 'Your selection'].filter(Boolean).join(' · ')}</small></div>)}</div><p className="explanation">{q.explanation}</p></article>)}</div><div className="action-bar"><p>Results saved to your performance history.</p><button className="primary" disabled={disabled} onClick={() => { setView('setup'); setSubject(''); setLevel(''); }}>Take another assessment →</button></div>
+      </section>}
+
+      {view === 'history' && <section><div className="eyebrow">YOUR LEARNING RECORD</div><h1 ref={heading} tabIndex={-1}>History & performance.</h1><p className="lead">Resume unfinished work or see how your results change over time.</p>
+        <div className="section-label"><h2>Performance by subject and level</h2></div>{history.performance.length ? <div className="performance-grid">{history.performance.map(p => <article className="performance-card" key={`${p.subject}-${p.level}`}><small>{p.level}</small><h3>{p.subject}</h3><strong>{p.average}% <span>average</span></strong><p>{p.attempts} completed · Best {p.best}%</p></article>)}</div> : <div className="empty-state">Complete your first assessment to start tracking your performance.</div>}
+        <div className="section-label"><h2>Recent assessments</h2><button className="text-button" disabled={disabled} onClick={showHistory}>Refresh</button></div><p className="muted">Your latest 50 attempts. Performance summaries include all completed attempts.</p><div className="history-list">{history.attempts.length ? history.attempts.map(a => <article className="history-row" key={a.id}><div><strong>{a.subject}</strong><p>{a.level} · {date(a.created_at)}</p></div><span className="history-status">{a.percentage !== null ? `${a.percentage}%` : a.status.replaceAll('_', ' ')}</span><div className="history-actions">{['submitted', 'in_progress'].includes(a.status) && <button className="secondary" disabled={disabled} onClick={() => openAttempt(a)}>{a.status === 'submitted' ? 'View results' : 'Resume'}</button>}{['in_progress', 'generating', 'failed'].includes(a.status) && <button className="text-button" disabled={disabled} onClick={() => discard(a)}>Discard</button>}</div></article>) : <div className="empty-state">No assessments yet. Choose a subject to begin.</div>}</div>
+      </section>}
+    </main><footer className="footer">Questionnaire AI <span>Learn with context. Practice with purpose.</span></footer>
+  </div>;
 }

@@ -2,15 +2,16 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from backend.app.api.v1.api import api_router
-from backend.app.models.user import Base
+from sqlalchemy import text
 from backend.app.db.session import async_engine
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Automatically create tables if they do not exist
-    async with async_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # Apply migrations explicitly with `python -m alembic upgrade head` first.
+    async with async_engine.connect() as conn:
+        await conn.execute(text('SELECT 1 FROM assessment_attempts LIMIT 1'))
     yield
+    await async_engine.dispose()
 
 app = FastAPI(
     title="Questionnaire AI API",
@@ -22,7 +23,7 @@ app = FastAPI(
 # CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Adjust for production frontend origins
+    allow_origins=["http://localhost:8501", "http://127.0.0.1:8501"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
