@@ -23,6 +23,7 @@ yarn-error.log*
 frontend/dist/
 frontend/dist-ssr/
 *.local
+artifacts/
 
 # IDE
 .idea/

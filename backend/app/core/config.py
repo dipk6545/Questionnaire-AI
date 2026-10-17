@@ -1,9 +1,8 @@
 import os
-import json
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parents[3] / '.env')
 
 class GoogleAuthSettings:
     def __init__(self):
@@ -14,7 +13,11 @@ class GoogleAuthSettings:
 class Settings:
     def __init__(self):
         self.google_auth = GoogleAuthSettings()
-        db_url = os.getenv("LAYER_BASE_CONNECTION_STRING", "").strip().strip('\\').strip('/')
+        # Existing project configuration stores the OpenAI key as LAYER_BASE.
+        self.OPENAI_API_KEY: str = (os.getenv("OPENAI_API_KEY", "").strip()
+                                    or os.getenv("LAYER_BASE", "").strip())
+        self.OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4.1")
+        db_url = os.getenv("DATABASE_URL", os.getenv("LAYER_BASE_CONNECTION_STRING", "")).strip()
         if db_url.startswith("postgresql://"):
             db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
         # asyncpg accepts ssl=require, whereas psycopg2 uses sslmode=require
@@ -25,4 +28,3 @@ class Settings:
 
 def get_settings() -> Settings:
     return Settings()
- 
