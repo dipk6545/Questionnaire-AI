@@ -72,3 +72,105 @@ progress { display: block; width: 100%; height: 6px; border: 0; border-radius: 8
 .footer { display: flex; justify-content: space-between; gap: 20px; max-width: 1110px; width: 100%; padding: 22px 36px; margin: auto; border-top: 1px solid #dce3ee; font-size: 11px; color: #97a1b2; }
 @media (max-width: 800px) { .subject-grid, .level-grid { grid-template-columns: repeat(2, 1fr); }.feedback-grid, .performance-grid { grid-template-columns: 1fr; }.account-name { display: none; }.result-card { gap: 22px; padding: 24px; }.score { min-width: 120px; }.history-row { flex-wrap: wrap; }.history-actions { width: 100%; }.history-status { font-size: 11px; } }
 @media (max-width: 480px) { .workspace { padding: 0 18px 40px; }.topbar-inner { padding: 16px 18px; }.brand { font-size: 16px; }.brand small { font-size: 7px; }.brand-icon { width: 34px; height: 39px; font-size: 22px; }.account { gap: 4px; }.avatar { display: none; }.subject-card { padding: 16px 13px; }.level-card { padding: 15px 10px; }.navigation { gap: 18px; margin-bottom: 30px; }.navigation button { font-size: 11px; }.question-card, .review-card { padding: 18px; }.action-bar { align-items: stretch; flex-direction: column; }.result-card { flex-direction: column; }.score { border: 0; border-bottom: 1px solid #e1e6ee; padding-bottom: 22px; }.review-option { flex-wrap: wrap; }.review-option small { margin-left: 20px; }.login-facts { gap: 12px; font-size: 9px; }.login-view { padding-top: 40px; }.footer { padding: 20px 18px; font-size: 9px; } }
+
+/* Non-scrollable login page */
+.login-shell {
+  height: 100vh;
+  max-height: 100vh;
+  overflow: hidden;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+.login-workspace {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 20px;
+  max-width: 600px;
+  margin: auto;
+  flex: none;
+}
+.login-shell .login-view {
+  padding: 0;
+  width: 100%;
+}
+.login-shell .login-view h1 {
+  font-size: clamp(26px, 3.5vw, 38px);
+  margin-bottom: 8px;
+}
+.login-shell .login-view .lead {
+  font-size: 13px;
+  line-height: 1.6;
+  margin-bottom: 18px;
+}
+.login-shell .login-card {
+  padding: 20px 24px;
+}
+.login-shell .login-card .brand-icon {
+  margin-bottom: 12px;
+}
+.login-shell .login-card h2 {
+  font-size: 16px;
+  margin-bottom: 4px;
+}
+.login-shell .login-facts {
+  margin: 14px 0 0;
+}
+
+/* Floating React Toast notification for errors */
+.toast-error {
+  position: fixed;
+  top: 24px;
+  right: 24px;
+  z-index: 9999;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  background: #ffffff;
+  border: 1px solid #fed7d7;
+  border-left: 5px solid #e53e3e;
+  border-radius: 12px;
+  padding: 16px 20px;
+  max-width: 420px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
+  animation: slideIn 0.25s ease-out;
+}
+@keyframes slideIn {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+.toast-content {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.toast-icon {
+  font-size: 18px;
+  margin-top: 1px;
+}
+.toast-content strong {
+  display: block;
+  font-size: 14px;
+  color: #c53030;
+  margin-bottom: 3px;
+}
+.toast-content p {
+  margin: 0;
+  font-size: 13px;
+  color: #4a5568;
+  line-height: 1.5;
+}
+.toast-close {
+  background: transparent;
+  border: none;
+  font-size: 20px;
+  color: #a0aec0;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}
+.toast-close:hover {
+  color: #4a5568;
+}

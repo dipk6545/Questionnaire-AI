@@ -1,9 +1,9 @@
 import asyncio
 from alembic import context
 from sqlalchemy.ext.asyncio import create_async_engine
-from backend.app.core.config import get_settings
-from backend.app.models.user import Base
-from backend.app.models import examination  # noqa: F401 -- register metadata
+from app.core.config import get_settings
+from app.models.user import Base
+from app.models import examination  # noqa: F401 -- register metadata
 
 target_metadata = Base.metadata
 

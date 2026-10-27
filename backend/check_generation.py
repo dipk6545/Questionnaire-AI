@@ -5,8 +5,8 @@ from unittest.mock import patch
 from fastapi import HTTPException
 from openai import AsyncOpenAI, APIStatusError
 from pydantic import ValidationError
-from backend.app.core.config import get_settings
-from backend.app.services import examination
+from app.core.config import get_settings
+from app.services import examination
 
 
 async def main():

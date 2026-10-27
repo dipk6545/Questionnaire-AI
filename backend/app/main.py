@@ -1,9 +1,9 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from backend.app.api.v1.api import api_router
+from app.api.v1.api import api_router
 from sqlalchemy import text
-from backend.app.db.session import async_engine
+from app.db.session import async_engine
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

@@ -3,13 +3,23 @@ from datetime import timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from backend.app.api.v1.endpoints.auth import current_user
-from backend.app.core.config import get_settings
-from backend.app.db.session import get_db_session
-from backend.app.models.user import User
-from backend.app.models.examination import AssessmentAttempt, Question, Answer, Result, Feedback, now
-from backend.app.schemas.examination import ExamRequest, AnswerBatch
-from backend.app.services import examination as service
+from app.api.v1.endpoints.auth import current_user
+from app.core.config import get_settings
+from app.db.session import get_db_session
+from app.models.user import User
+from app.models.examination import AssessmentAttempt, Question, Answer, Result, Feedback, now
+from app.models.question_bank import QuestionBank
+from app.schemas.examination import ExamRequest, AnswerBatch
+from app.services import examination as service
+
+
+async def async_background_feedback(attempt_id: str, user_id: str):
+    from app.core.database import async_session_factory
+    async with async_session_factory() as session:
+        try:
+            await ensure_feedback(session, attempt_id, user_id)
+        except Exception:
+            pass
 
 router = APIRouter()
 
@@ -46,31 +56,35 @@ async def result_view(db, attempt):
     feedback = await db.get(Feedback, attempt.id)
     answers = {a.question_id: a for a in (await db.scalars(
         select(Answer).where(Answer.attempt_id == attempt.id))).all()}
+    score = result.score if result else 0
+    total = result.total if result else 5
+    percentage = result.percentage if result else (score * 20)
     return {'id': attempt.id, 'subject': attempt.subject, 'level': attempt.level,
-            'score': result.score, 'total': result.total, 'percentage': result.percentage,
+            'score': score, 'total': total, 'percentage': percentage,
             'submitted_at': attempt.submitted_at,
             'feedback_status': 'ready' if feedback else 'pending',
             'feedback': {k: getattr(feedback, k) for k in
                          ['summary', 'strengths', 'focus_areas', 'next_steps']} if feedback else None,
             'review': [{'id': q.id, 'text': q.text, 'topic': q.topic, 'kind': q.kind,
                         'options': q.options, 'correct_options': q.correct_options,
-                        'explanation': q.explanation, 'selected_options': answers[q.id].selected_options,
-                        'correct': answers[q.id].correct} for q in await question_rows(db, attempt.id)]}
+                        'explanation': q.explanation, 'selected_options': answers[q.id].selected_options if q.id in answers else [],
+                        'correct': answers[q.id].correct if q.id in answers else False} for q in await question_rows(db, attempt.id)]}
 
 
 async def ensure_feedback(db, attempt_id, user_id):
     # The score is already committed. Serialize feedback retries across workers.
-    attempt = await owned(db, attempt_id, user_id, lock=True)
-    if not await db.get(Feedback, attempt_id):
-        view = await result_view(db, attempt)
-        try:
+    try:
+        attempt = await owned(db, attempt_id, user_id, lock=True)
+        if not await db.get(Feedback, attempt_id):
+            view = await result_view(db, attempt)
             generated = await service.generate_feedback(attempt.subject, attempt.level,
                                                         view['score'], view['review'])
-        except HTTPException:
-            await db.rollback()
-            return  # Pending feedback can be retried without losing the student's marks.
-        db.add(Feedback(attempt_id=attempt_id, model=get_settings().OPENAI_MODEL, **generated.model_dump()))
-    await db.commit()
+            if generated:
+                db.add(Feedback(attempt_id=attempt_id, model=get_settings().OPENAI_MODEL, **generated.model_dump()))
+                await db.commit()
+    except Exception:
+        # Ignore AI feedback generation failure; scores and answers are safely committed
+        pass
 
 
 @router.get('/options')
@@ -122,12 +136,39 @@ async def create_exam(request: ExamRequest, user: User = Depends(current_user),
     db.add(attempt)
     await db.commit()
     try:
-        generated = await service.generate_questions(request.subject, request.level)
+        # 1. Fetch 5 random pre-generated questions directly from the database question_bank
+        bank_stmt = (
+            select(QuestionBank)
+            .where(QuestionBank.subject == request.subject, QuestionBank.level == request.level)
+            .order_by(func.random())
+            .limit(5)
+        )
+        bank_questions = list((await db.scalars(bank_stmt)).all())
+
         attempt = await owned(db, attempt_id, user_id, lock=True)
         if attempt.status != 'generating':
-            raise HTTPException(409, 'This assessment was discarded during generation.')
-        for position, q in enumerate(generated.questions):
-            db.add(Question(attempt_id=attempt_id, position=position, **q.model_dump()))
+            raise HTTPException(409, 'This assessment was discarded during initialization.')
+
+        if len(bank_questions) >= 5:
+            # Instant load directly from database bank!
+            for position, q in enumerate(bank_questions):
+                db.add(Question(
+                    attempt_id=attempt_id,
+                    position=position,
+                    text=q.text,
+                    topic=q.topic,
+                    kind=q.kind,
+                    options=q.options,
+                    correct_options=q.correct_options,
+                    explanation=q.explanation
+                ))
+            attempt.model = bank_questions[0].model or 'database-bank'
+        else:
+            # Fallback to LLM only if the database bank does not have enough questions yet
+            generated = await service.generate_questions(request.subject, request.level)
+            for position, q in enumerate(generated.questions):
+                db.add(Question(attempt_id=attempt_id, position=position, **q.model_dump()))
+
         attempt.status = 'in_progress'
         await db.commit()
     except Exception:
@@ -195,10 +236,7 @@ async def submit(attempt_id: str, batch: AnswerBatch, user: User = Depends(curre
         db.add(Result(attempt_id=attempt_id, score=score, total=5, percentage=score * 20))
         attempt.status, attempt.submitted_at = 'submitted', now()
         await db.commit()
-    else:
-        raise HTTPException(409, 'This assessment is not available for submission.')
-    await ensure_feedback(db, attempt_id, user_id)
-    return await result_view(db, await owned(db, attempt_id, user_id))
+    return await result_view(db, attempt)
 
 
 @router.get('/{attempt_id}/result')
