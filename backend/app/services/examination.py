@@ -33,27 +33,36 @@ class InvalidAssessment(HTTPException):
 
 async def _groq_completion(schema, instructions, payload, settings):
     logger.info("Attempting completion using fallback Groq model: %s", settings.GROQ_MODEL)
-    try:
-        client = AsyncGroq(api_key=settings.GROQ_API_KEY)
-        schema_json = json.dumps(schema.model_json_schema())
-        system_prompt = (
-            f"{instructions}\n\n"
-            f"You MUST output valid JSON strictly conforming to this JSON Schema:\n{schema_json}"
-        )
-        response = await client.chat.completions.create(
-            model=settings.GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(payload)}
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.7,
-        )
-        raw_content = response.choices[0].message.content
-        return schema.model_validate_json(raw_content)
-    except Exception as e:
-        logger.error("Groq fallback failed: %s", e)
-        raise HTTPException(502, f"Groq fallback generation failed: {e}")
+    client = AsyncGroq(api_key=settings.GROQ_API_KEY)
+    schema_json = json.dumps(schema.model_json_schema())
+    system_prompt = (
+        f"{instructions}\n\n"
+        f"CRITICAL FORMAT RULES:\n"
+        f"1. Each question must provide exactly 4 DISTINCT nonempty options.\n"
+        f"2. For single questions: correct_options must have exactly 1 option index.\n"
+        f"3. For multiple questions: correct_options must have 2 or 3 option indices.\n"
+        f"4. Output strictly valid JSON matching this schema:\n{schema_json}"
+    )
+    last_err = None
+    for attempt in range(2):
+        try:
+            response = await client.chat.completions.create(
+                model=settings.GROQ_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(payload)}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.7,
+            )
+            raw_content = response.choices[0].message.content
+            return schema.model_validate_json(raw_content)
+        except Exception as e:
+            last_err = e
+            logger.warning("Groq attempt %d validation error: %s", attempt + 1, e)
+
+    logger.error("Groq fallback failed: %s", last_err)
+    raise HTTPException(502, f"Groq fallback generation failed: {last_err}")
 
 
 _OPENAI_FAILED = False
@@ -61,7 +70,7 @@ _OPENAI_FAILED = False
 async def completion(schema, instructions, payload, direct_groq=False):
     global _OPENAI_FAILED
     settings = get_settings()
-    has_openai = bool(settings.OPENAI_API_KEY and not settings.OPENAI_API_KEY.startswith('your_')) and not _OPENAI_FAILED and not direct_groq
+    has_openai = bool(settings.OPENAI_API_KEY and not settings.OPENAI_API_KEY.startswith(('your_', 'sk_49504df1f292'))) and not _OPENAI_FAILED and not direct_groq
     has_groq = bool(settings.GROQ_API_KEY and not settings.GROQ_API_KEY.startswith('your_'))
 
     if not has_openai and not has_groq:
@@ -104,9 +113,14 @@ def score_selection(selected: list, correct: list) -> bool:
 
 
 async def generate_questions(subject: str, level: str) -> QuestionSet:
-    instructions = f'Generate 5 rigorous multiple-choice questions for {subject} at {level} difficulty.'
+    instructions = (
+        f'Generate an assessment plan containing exactly 4 single-answer multiple-choice questions '
+        f'(single_questions) and exactly 1 multiple-answer multiple-choice question (multiple_question) '
+        f'for {subject} at {level} difficulty.'
+    )
     payload = {'subject': subject, 'level': level, 'topics': SUBJECT_TOPICS.get(subject, [])}
-    return await completion(QuestionSet, instructions, payload)
+    plan: GenerationPlan = await completion(GenerationPlan, instructions, payload)
+    return plan.as_question_set()
 
 
 async def generate_feedback(subject: str, level: str, score: int, review: list):

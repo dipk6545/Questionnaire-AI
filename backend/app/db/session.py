@@ -10,7 +10,10 @@ async_engine = create_async_engine(
     app_settings.DATABASE_URL,
     echo=False,
     future=True,
-    pool_pre_ping=True,      # Tests connection before using it
+    pool_size=10,
+    max_overflow=20,
+    pool_timeout=30,
+    pool_pre_ping=False,      # Tests connection before using it
     pool_recycle=300,        # Recycles connection after 5 minutes
     connect_args={"statement_cache_size": 0} if app_settings.DATABASE_URL.startswith("postgresql") else {},
 )

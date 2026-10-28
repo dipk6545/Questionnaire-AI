@@ -14,8 +14,8 @@ from app.services import examination as service
 
 
 async def async_background_feedback(attempt_id: str, user_id: str):
-    from app.core.database import async_session_factory
-    async with async_session_factory() as session:
+    from app.db.session import SessionLocal
+    async with SessionLocal() as session:
         try:
             await ensure_feedback(session, attempt_id, user_id)
         except Exception:
@@ -112,8 +112,8 @@ async def history(user: User = Depends(current_user), db: AsyncSession = Depends
 async def create_exam(request: ExamRequest, user: User = Depends(current_user),
                       db: AsyncSession = Depends(get_db_session)):
     attempt_id, user_id = str(request.request_id), user.id
-    # Serialize creation per user, including identical request IDs.
-    await db.scalar(select(User).where(User.id == user_id).with_for_update())
+
+    # Check for existing attempt with this request ID
     existing = await db.get(AssessmentAttempt, attempt_id)
     if existing:
         if existing.user_id != user_id:
@@ -123,52 +123,61 @@ async def create_exam(request: ExamRequest, user: User = Depends(current_user),
         if existing.status in ('in_progress', 'submitted'):
             return await exam_view(db, existing)
         raise HTTPException(409, 'This request is generating or has failed. Check history before retrying.')
-    await db.execute(update(AssessmentAttempt).where(
-        AssessmentAttempt.user_id == user_id, AssessmentAttempt.status == 'generating',
-        AssessmentAttempt.created_at < now() - timedelta(minutes=10)).values(status='failed'))
+
+    # Check active limits
     active = await db.scalar(select(func.count()).select_from(AssessmentAttempt).where(
         AssessmentAttempt.user_id == user_id, AssessmentAttempt.status.in_(['generating', 'in_progress'])))
     if active >= 3:
         raise HTTPException(429, 'Resume or discard an unfinished assessment before starting another.')
+
+    # Check question bank
+    bank_stmt = (
+        select(QuestionBank)
+        .where(QuestionBank.subject == request.subject, QuestionBank.level == request.level)
+        .order_by(func.random())
+        .limit(5)
+    )
+    bank_questions = list((await db.scalars(bank_stmt)).all())
+
+    if len(bank_questions) >= 5:
+        # Fast path: Insert attempt and questions in a single commit and return response immediately
+        attempt = AssessmentAttempt(
+            id=attempt_id, user_id=user_id, subject=request.subject,
+            level=request.level, model=bank_questions[0].model or 'database-bank',
+            prompt_version=service.PROMPT_VERSION, status='in_progress'
+        )
+        db.add(attempt)
+        questions_payload = []
+        added_entities = []
+        for position, q in enumerate(bank_questions):
+            q_entity = Question(
+                attempt_id=attempt_id, position=position, text=q.text, topic=q.topic,
+                kind=q.kind, options=q.options, correct_options=q.correct_options, explanation=q.explanation
+            )
+            db.add(q_entity)
+            added_entities.append((q_entity, q))
+        await db.commit()
+        for q_entity, q in added_entities:
+            questions_payload.append({
+                'id': q_entity.id, 'text': q.text, 'topic': q.topic,
+                'kind': q.kind, 'options': q.options, 'selected_options': []
+            })
+        return {
+            'id': attempt.id, 'subject': attempt.subject, 'level': attempt.level,
+            'status': 'in_progress', 'created_at': attempt.created_at,
+            'questions': questions_payload
+        }
+
+    # Fallback path for unseeded subjects (calls LLM)
     attempt = AssessmentAttempt(id=attempt_id, user_id=user_id, subject=request.subject,
                                 level=request.level, model=get_settings().OPENAI_MODEL,
                                 prompt_version=service.PROMPT_VERSION, status='generating')
     db.add(attempt)
     await db.commit()
     try:
-        # 1. Fetch 5 random pre-generated questions directly from the database question_bank
-        bank_stmt = (
-            select(QuestionBank)
-            .where(QuestionBank.subject == request.subject, QuestionBank.level == request.level)
-            .order_by(func.random())
-            .limit(5)
-        )
-        bank_questions = list((await db.scalars(bank_stmt)).all())
-
-        attempt = await owned(db, attempt_id, user_id, lock=True)
-        if attempt.status != 'generating':
-            raise HTTPException(409, 'This assessment was discarded during initialization.')
-
-        if len(bank_questions) >= 5:
-            # Instant load directly from database bank!
-            for position, q in enumerate(bank_questions):
-                db.add(Question(
-                    attempt_id=attempt_id,
-                    position=position,
-                    text=q.text,
-                    topic=q.topic,
-                    kind=q.kind,
-                    options=q.options,
-                    correct_options=q.correct_options,
-                    explanation=q.explanation
-                ))
-            attempt.model = bank_questions[0].model or 'database-bank'
-        else:
-            # Fallback to LLM only if the database bank does not have enough questions yet
-            generated = await service.generate_questions(request.subject, request.level)
-            for position, q in enumerate(generated.questions):
-                db.add(Question(attempt_id=attempt_id, position=position, **q.model_dump()))
-
+        generated = await service.generate_questions(request.subject, request.level)
+        for position, q in enumerate(generated.questions):
+            db.add(Question(attempt_id=attempt_id, position=position, **q.model_dump()))
         attempt.status = 'in_progress'
         await db.commit()
     except Exception:
@@ -236,6 +245,8 @@ async def submit(attempt_id: str, batch: AnswerBatch, user: User = Depends(curre
         db.add(Result(attempt_id=attempt_id, score=score, total=5, percentage=score * 20))
         attempt.status, attempt.submitted_at = 'submitted', now()
         await db.commit()
+    import asyncio
+    asyncio.create_task(async_background_feedback(attempt_id, user_id))
     return await result_view(db, attempt)
 
 
@@ -269,3 +280,40 @@ async def discard(attempt_id: str, user: User = Depends(current_user),
     attempt.status = 'discarded'
     await db.commit()
     return {'ok': True}
+
+_IS_SEEDING_RUNNING: bool = False
+_LAST_SEED_FINISHED_TIME: float = 0.0
+
+async def _background_seed_worker():
+    global _IS_SEEDING_RUNNING, _LAST_SEED_FINISHED_TIME
+    import time
+    import logging
+    _logger = logging.getLogger('background_seed')
+    try:
+        from scripts.seed_questions import run_pipeline
+        _logger.info('Starting background seed generation job...')
+        await run_pipeline()
+        _logger.info('Background seed generation completed successfully.')
+    except Exception as e:
+        _logger.error('Background seed generation encountered error: %s', e)
+    finally:
+        _IS_SEEDING_RUNNING = False
+        _LAST_SEED_FINISHED_TIME = time.time()
+
+
+@router.post('/seed-tick')
+async def trigger_seed_tick(user: User = Depends(current_user)):
+    global _IS_SEEDING_RUNNING, _LAST_SEED_FINISHED_TIME
+    import time
+    import asyncio
+
+    if _IS_SEEDING_RUNNING:
+        return {'status': 'busy', 'message': 'Seeding process currently running'}
+
+    elapsed = time.time() - _LAST_SEED_FINISHED_TIME
+    if elapsed < 10.0:
+        return {'status': 'cooldown', 'remaining': round(10.0 - elapsed, 1)}
+
+    _IS_SEEDING_RUNNING = True
+    asyncio.create_task(_background_seed_worker())
+    return {'status': 'started', 'message': 'Background seeding job dispatched'}
