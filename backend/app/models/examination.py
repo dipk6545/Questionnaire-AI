@@ -2,7 +2,7 @@
 from datetime import datetime, timezone
 from sqlalchemy import DateTime, ForeignKey, String, Text, JSON, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
-from backend.app.models.user import Base
+from app.models.user import Base
 
 
 def now():

@@ -1,7 +1,7 @@
 """Print table definitions only; never prints credentials or student data."""
 import asyncio
 from sqlalchemy import inspect
-from backend.app.db.session import async_engine
+from app.db.session import async_engine
 
 
 def describe(connection):

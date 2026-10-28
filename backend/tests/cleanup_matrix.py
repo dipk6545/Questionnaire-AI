@@ -6,8 +6,8 @@ import re
 from pathlib import Path
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
-from backend.app.core.config import get_settings
-from backend.app.models.examination import now
+from app.core.config import get_settings
+from app.models.examination import now
 from backend.tests.live_matrix import write_report
 
 

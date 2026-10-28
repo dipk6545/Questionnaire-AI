@@ -14,13 +14,13 @@ import httpx
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import select, func
-from backend.app.main import app
-from backend.app.db.session import async_engine, SessionLocal, get_db_session
-from backend.app.models.user import Base, User
-from backend.app.models.examination import LoginSession, LoginEvent, OAuthState, AssessmentAttempt, Answer, Result, Feedback, now
-from backend.app.api.v1.endpoints import auth
-from backend.app.schemas.examination import QuestionSet, GenerationPlan, ReviewPlan, PerformanceFeedback
-from backend.app.services import examination as service
+from app.main import app
+from app.db.session import async_engine, SessionLocal, get_db_session
+from app.models.user import Base, User
+from app.models.examination import LoginSession, LoginEvent, OAuthState, AssessmentAttempt, Answer, Result, Feedback, now
+from app.api.v1.endpoints import auth
+from app.schemas.examination import QuestionSet, GenerationPlan, ReviewPlan, PerformanceFeedback
+from app.services import examination as service
 
 
 def question_set():

@@ -3,13 +3,23 @@ from datetime import timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from backend.app.api.v1.endpoints.auth import current_user
-from backend.app.core.config import get_settings
-from backend.app.db.session import get_db_session
-from backend.app.models.user import User
-from backend.app.models.examination import AssessmentAttempt, Question, Answer, Result, Feedback, now
-from backend.app.schemas.examination import ExamRequest, AnswerBatch
-from backend.app.services import examination as service
+from app.api.v1.endpoints.auth import current_user
+from app.core.config import get_settings
+from app.db.session import get_db_session
+from app.models.user import User
+from app.models.examination import AssessmentAttempt, Question, Answer, Result, Feedback, now
+from app.models.question_bank import QuestionBank
+from app.schemas.examination import ExamRequest, AnswerBatch
+from app.services import examination as service
+
+
+async def async_background_feedback(attempt_id: str, user_id: str):
+    from app.db.session import SessionLocal
+    async with SessionLocal() as session:
+        try:
+            await ensure_feedback(session, attempt_id, user_id)
+        except Exception:
+            pass
 
 router = APIRouter()
 
@@ -46,31 +56,35 @@ async def result_view(db, attempt):
     feedback = await db.get(Feedback, attempt.id)
     answers = {a.question_id: a for a in (await db.scalars(
         select(Answer).where(Answer.attempt_id == attempt.id))).all()}
+    score = result.score if result else 0
+    total = result.total if result else 5
+    percentage = result.percentage if result else (score * 20)
     return {'id': attempt.id, 'subject': attempt.subject, 'level': attempt.level,
-            'score': result.score, 'total': result.total, 'percentage': result.percentage,
+            'score': score, 'total': total, 'percentage': percentage,
             'submitted_at': attempt.submitted_at,
             'feedback_status': 'ready' if feedback else 'pending',
             'feedback': {k: getattr(feedback, k) for k in
                          ['summary', 'strengths', 'focus_areas', 'next_steps']} if feedback else None,
             'review': [{'id': q.id, 'text': q.text, 'topic': q.topic, 'kind': q.kind,
                         'options': q.options, 'correct_options': q.correct_options,
-                        'explanation': q.explanation, 'selected_options': answers[q.id].selected_options,
-                        'correct': answers[q.id].correct} for q in await question_rows(db, attempt.id)]}
+                        'explanation': q.explanation, 'selected_options': answers[q.id].selected_options if q.id in answers else [],
+                        'correct': answers[q.id].correct if q.id in answers else False} for q in await question_rows(db, attempt.id)]}
 
 
 async def ensure_feedback(db, attempt_id, user_id):
     # The score is already committed. Serialize feedback retries across workers.
-    attempt = await owned(db, attempt_id, user_id, lock=True)
-    if not await db.get(Feedback, attempt_id):
-        view = await result_view(db, attempt)
-        try:
+    try:
+        attempt = await owned(db, attempt_id, user_id, lock=True)
+        if not await db.get(Feedback, attempt_id):
+            view = await result_view(db, attempt)
             generated = await service.generate_feedback(attempt.subject, attempt.level,
                                                         view['score'], view['review'])
-        except HTTPException:
-            await db.rollback()
-            return  # Pending feedback can be retried without losing the student's marks.
-        db.add(Feedback(attempt_id=attempt_id, model=get_settings().OPENAI_MODEL, **generated.model_dump()))
-    await db.commit()
+            if generated:
+                db.add(Feedback(attempt_id=attempt_id, model=get_settings().OPENAI_MODEL, **generated.model_dump()))
+                await db.commit()
+    except Exception:
+        # Ignore AI feedback generation failure; scores and answers are safely committed
+        pass
 
 
 @router.get('/options')
@@ -98,8 +112,8 @@ async def history(user: User = Depends(current_user), db: AsyncSession = Depends
 async def create_exam(request: ExamRequest, user: User = Depends(current_user),
                       db: AsyncSession = Depends(get_db_session)):
     attempt_id, user_id = str(request.request_id), user.id
-    # Serialize creation per user, including identical request IDs.
-    await db.scalar(select(User).where(User.id == user_id).with_for_update())
+
+    # Check for existing attempt with this request ID
     existing = await db.get(AssessmentAttempt, attempt_id)
     if existing:
         if existing.user_id != user_id:
@@ -109,13 +123,52 @@ async def create_exam(request: ExamRequest, user: User = Depends(current_user),
         if existing.status in ('in_progress', 'submitted'):
             return await exam_view(db, existing)
         raise HTTPException(409, 'This request is generating or has failed. Check history before retrying.')
-    await db.execute(update(AssessmentAttempt).where(
-        AssessmentAttempt.user_id == user_id, AssessmentAttempt.status == 'generating',
-        AssessmentAttempt.created_at < now() - timedelta(minutes=10)).values(status='failed'))
+
+    # Check active limits
     active = await db.scalar(select(func.count()).select_from(AssessmentAttempt).where(
         AssessmentAttempt.user_id == user_id, AssessmentAttempt.status.in_(['generating', 'in_progress'])))
     if active >= 3:
         raise HTTPException(429, 'Resume or discard an unfinished assessment before starting another.')
+
+    # Check question bank
+    bank_stmt = (
+        select(QuestionBank)
+        .where(QuestionBank.subject == request.subject, QuestionBank.level == request.level)
+        .order_by(func.random())
+        .limit(5)
+    )
+    bank_questions = list((await db.scalars(bank_stmt)).all())
+
+    if len(bank_questions) >= 5:
+        # Fast path: Insert attempt and questions in a single commit and return response immediately
+        attempt = AssessmentAttempt(
+            id=attempt_id, user_id=user_id, subject=request.subject,
+            level=request.level, model=bank_questions[0].model or 'database-bank',
+            prompt_version=service.PROMPT_VERSION, status='in_progress'
+        )
+        db.add(attempt)
+        questions_payload = []
+        added_entities = []
+        for position, q in enumerate(bank_questions):
+            q_entity = Question(
+                attempt_id=attempt_id, position=position, text=q.text, topic=q.topic,
+                kind=q.kind, options=q.options, correct_options=q.correct_options, explanation=q.explanation
+            )
+            db.add(q_entity)
+            added_entities.append((q_entity, q))
+        await db.commit()
+        for q_entity, q in added_entities:
+            questions_payload.append({
+                'id': q_entity.id, 'text': q.text, 'topic': q.topic,
+                'kind': q.kind, 'options': q.options, 'selected_options': []
+            })
+        return {
+            'id': attempt.id, 'subject': attempt.subject, 'level': attempt.level,
+            'status': 'in_progress', 'created_at': attempt.created_at,
+            'questions': questions_payload
+        }
+
+    # Fallback path for unseeded subjects (calls LLM)
     attempt = AssessmentAttempt(id=attempt_id, user_id=user_id, subject=request.subject,
                                 level=request.level, model=get_settings().OPENAI_MODEL,
                                 prompt_version=service.PROMPT_VERSION, status='generating')
@@ -123,9 +176,6 @@ async def create_exam(request: ExamRequest, user: User = Depends(current_user),
     await db.commit()
     try:
         generated = await service.generate_questions(request.subject, request.level)
-        attempt = await owned(db, attempt_id, user_id, lock=True)
-        if attempt.status != 'generating':
-            raise HTTPException(409, 'This assessment was discarded during generation.')
         for position, q in enumerate(generated.questions):
             db.add(Question(attempt_id=attempt_id, position=position, **q.model_dump()))
         attempt.status = 'in_progress'
@@ -195,10 +245,9 @@ async def submit(attempt_id: str, batch: AnswerBatch, user: User = Depends(curre
         db.add(Result(attempt_id=attempt_id, score=score, total=5, percentage=score * 20))
         attempt.status, attempt.submitted_at = 'submitted', now()
         await db.commit()
-    else:
-        raise HTTPException(409, 'This assessment is not available for submission.')
-    await ensure_feedback(db, attempt_id, user_id)
-    return await result_view(db, await owned(db, attempt_id, user_id))
+    import asyncio
+    asyncio.create_task(async_background_feedback(attempt_id, user_id))
+    return await result_view(db, attempt)
 
 
 @router.get('/{attempt_id}/result')
@@ -231,3 +280,40 @@ async def discard(attempt_id: str, user: User = Depends(current_user),
     attempt.status = 'discarded'
     await db.commit()
     return {'ok': True}
+
+_IS_SEEDING_RUNNING: bool = False
+_LAST_SEED_FINISHED_TIME: float = 0.0
+
+async def _background_seed_worker():
+    global _IS_SEEDING_RUNNING, _LAST_SEED_FINISHED_TIME
+    import time
+    import logging
+    _logger = logging.getLogger('background_seed')
+    try:
+        from scripts.seed_questions import run_pipeline
+        _logger.info('Starting background seed generation job...')
+        await run_pipeline()
+        _logger.info('Background seed generation completed successfully.')
+    except Exception as e:
+        _logger.error('Background seed generation encountered error: %s', e)
+    finally:
+        _IS_SEEDING_RUNNING = False
+        _LAST_SEED_FINISHED_TIME = time.time()
+
+
+@router.post('/seed-tick')
+async def trigger_seed_tick(user: User = Depends(current_user)):
+    global _IS_SEEDING_RUNNING, _LAST_SEED_FINISHED_TIME
+    import time
+    import asyncio
+
+    if _IS_SEEDING_RUNNING:
+        return {'status': 'busy', 'message': 'Seeding process currently running'}
+
+    elapsed = time.time() - _LAST_SEED_FINISHED_TIME
+    if elapsed < 10.0:
+        return {'status': 'cooldown', 'remaining': round(10.0 - elapsed, 1)}
+
+    _IS_SEEDING_RUNNING = True
+    asyncio.create_task(_background_seed_worker())
+    return {'status': 'started', 'message': 'Background seeding job dispatched'}

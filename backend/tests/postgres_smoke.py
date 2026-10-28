@@ -11,14 +11,14 @@ from unittest.mock import AsyncMock, patch
 import httpx
 from sqlalchemy import text, select, func
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-from backend.app.core.config import get_settings
-from backend.app.main import app
-from backend.app.db.session import get_db_session
-from backend.app.models.user import Base, User
-from backend.app.models.examination import LoginSession, Result, Question, Answer, Feedback, now
-from backend.app.api.v1.endpoints.auth import digest
-from backend.app.schemas.examination import QuestionSet, PerformanceFeedback
-from backend.app.services import examination as service
+from app.core.config import get_settings
+from app.main import app
+from app.db.session import get_db_session
+from app.models.user import Base, User
+from app.models.examination import LoginSession, Result, Question, Answer, Feedback, now
+from app.api.v1.endpoints.auth import digest
+from app.schemas.examination import QuestionSet, PerformanceFeedback
+from app.services import examination as service
 
 
 async def main():

@@ -1,8 +1,8 @@
 """Read recent assessment status for diagnostics; excludes student identities/answers."""
 import asyncio
 from sqlalchemy import select, func
-from backend.app.db.session import SessionLocal, async_engine
-from backend.app.models.examination import AssessmentAttempt, Question
+from app.db.session import SessionLocal, async_engine
+from app.models.examination import AssessmentAttempt, Question
 
 
 async def main():
