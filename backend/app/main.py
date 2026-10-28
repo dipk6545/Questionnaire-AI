@@ -1,3 +1,4 @@
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,9 +22,22 @@ app = FastAPI(
 )
 
 # CORS configuration
+allowed_origins = [
+    "http://localhost:8501",
+    "http://127.0.0.1:8501",
+    "https://questionnaireai.netlify.app",
+]
+
+env_cors = os.getenv("CORS_ORIGINS", "")
+if env_cors:
+    if env_cors.strip() == "*":
+        allowed_origins = ["*"]
+    else:
+        allowed_origins.extend([origin.strip() for origin in env_cors.split(",") if origin.strip()])
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8501", "http://127.0.0.1:8501"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
